@@ -101,6 +101,20 @@ class AppSpiderClient:
 
         return data.get("Scans") or data.get("Data") or []
 
+    def get_scan_statuses(self):
+        """Fetch the scan status enum mapping (id -> name)."""
+        resp = self._get("Scan/GetScanStatuses")
+        data = resp.json()
+
+        if not data.get("IsSuccess"):
+            raise RuntimeError(
+                f"Failed to get scan statuses: {data.get('ErrorMessage') or 'unknown error'}"
+            )
+
+        # Returns a dict mapping status ID to name
+        statuses = data.get("Statuses") or data.get("Data") or []
+        return {s.get("Id") or s.get("id"): s.get("Name") or s.get("name") for s in statuses}
+
     def has_report(self, scan_id):
         resp = self._get("Scan/HasReport", params={"scanId": scan_id})
         data = resp.json()
@@ -215,6 +229,22 @@ def main():
             print(f"Error resolving client: {e}", file=sys.stderr)
             sys.exit(1)
 
+    # Fetch scan status mapping to find the "Completed" status ID
+    try:
+        status_map = client.get_scan_statuses()
+        completed_status_id = None
+        for status_id, status_name in status_map.items():
+            if status_name and status_name.lower() == "completed":
+                completed_status_id = status_id
+                break
+        if completed_status_id is None:
+            print(f"Warning: Could not find 'Completed' status in: {status_map}", file=sys.stderr)
+            print("Will attempt to match on status name instead.", file=sys.stderr)
+    except Exception as e:
+        print(f"Warning: Could not fetch status mapping: {e}", file=sys.stderr)
+        status_map = {}
+        completed_status_id = None
+
     # Fetch scans
     print("Fetching scan list...")
     try:
@@ -228,9 +258,15 @@ def main():
     # Filter for completed scans started after cutoff date
     matching = []
     for scan in scans:
-        status = scan.get("Status") or ""
-        if status.lower() != "completed":
-            continue
+        status = scan.get("Status")
+        # Status is an integer enum; compare to completed_status_id
+        if completed_status_id is not None:
+            if status != completed_status_id:
+                continue
+        else:
+            # Fallback: try string comparison if we couldn't get the mapping
+            if str(status).lower() != "completed":
+                continue
 
         start_time_str = scan.get("StartTime")
         start_time = parse_date(start_time_str)
