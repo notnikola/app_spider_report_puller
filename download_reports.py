@@ -90,23 +90,42 @@ class AppSpiderClient:
         return data.get("Clients") or data.get("Data") or []
 
     def get_scans(self, verbose=False):
-        """Fetch all scans."""
-        if verbose:
-            print("  Requesting scans...", end=" ", flush=True)
+        """Fetch all scans. Handles pagination."""
+        all_scans = []
+        page = 1
+        page_size = 100
 
-        resp = self._get("Scan/GetScans")
-        data = resp.json()
+        while True:
+            if verbose:
+                print(f"  Requesting page {page}...", end=" ", flush=True)
 
-        if not data.get("IsSuccess"):
-            raise RuntimeError(
-                f"Failed to get scans: {data.get('ErrorMessage') or 'unknown error'}"
-            )
+            resp = self._get("Scan/GetScans", params={
+                "pageSize": page_size,
+                "page": page,
+            })
+            data = resp.json()
 
-        scans = data.get("Scans") or data.get("Data") or []
-        if verbose:
-            print(f"got {len(scans)} scans")
+            if not data.get("IsSuccess"):
+                raise RuntimeError(
+                    f"Failed to get scans: {data.get('ErrorMessage') or 'unknown error'}"
+                )
 
-        return scans
+            scans = data.get("Scans") or data.get("Data") or []
+            if verbose:
+                print(f"got {len(scans)} scans")
+
+            if not scans:
+                break
+
+            all_scans.extend(scans)
+
+            # If we got fewer results than page size, we've reached the end
+            if len(scans) < page_size:
+                break
+
+            page += 1
+
+        return all_scans
 
     def has_report(self, scan_id):
         resp = self._get("Scan/HasReport", params={"scanId": scan_id})
@@ -169,7 +188,7 @@ def main():
     parser.add_argument("--username", required=True, help="Login username")
     parser.add_argument("--password", default=None, help="Login password (omit to be prompted securely)")
     parser.add_argument("--client", default=None, help="Client name to scope the session to (required for multi-client instances)")
-    parser.add_argument("--after", required=True, help="Download reports for scans completed after this date (YYYY-MM-DD)")
+    parser.add_argument("--after", required=True, help="Download reports for scans started after this date (YYYY-MM-DD)")
     parser.add_argument("--output", default="./reports", help="Output directory for downloaded reports (default: ./reports)")
     parser.add_argument("--no-verify-ssl", action="store_true", help="Disable SSL certificate verification")
     parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed progress")
@@ -233,27 +252,20 @@ def main():
 
     print(f"Found {len(scans)} total scans.")
 
-    # Filter for completed scans after cutoff date
+    # Filter for completed scans started after cutoff date
     matching = []
     for scan in scans:
-        status = scan.get("Status") or scan.get("ScanStatus") or ""
+        status = scan.get("Status") or ""
         if status.lower() != "completed":
             continue
 
-        # Try multiple possible date field names
-        completed_date_str = (
-            scan.get("CompletedTime")
-            or scan.get("CompletedDate")
-            or scan.get("EndTime")
-            or scan.get("FinishedTime")
-            or scan.get("ScanEndTime")
-        )
-        completed_date = parse_date(completed_date_str)
+        start_time_str = scan.get("StartTime")
+        start_time = parse_date(start_time_str)
 
-        if completed_date and completed_date >= cutoff:
-            matching.append((scan, completed_date))
+        if start_time and start_time >= cutoff:
+            matching.append((scan, start_time))
 
-    print(f"Found {len(matching)} completed scans after {args.after}.")
+    print(f"Found {len(matching)} completed scans started after {args.after}.")
 
     if not matching:
         print("Nothing to download.")
@@ -263,12 +275,12 @@ def main():
     downloaded = 0
     skipped = 0
 
-    for scan, completed_date in matching:
+    for scan, start_time in matching:
         scan_id = scan.get("Id") or scan.get("ScanId") or scan.get("id")
         scan_name = scan.get("Name") or scan.get("ScanName") or scan.get("ConfigName") or str(scan_id)
 
         label = f"{scan_name} ({scan_id})"
-        date_tag = completed_date.strftime("%Y%m%d")
+        date_tag = start_time.strftime("%Y%m%d")
 
         # Check if report exists
         try:
