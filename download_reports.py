@@ -65,15 +65,27 @@ class AppSpiderClient:
         resp.raise_for_status()
         return resp
 
-    def login(self, username, password):
-        resp = self._post("Authentication/Login", {"name": username, "password": password})
+    def login(self, username, password, client_id=None):
+        payload = {"name": username, "password": password}
+        if client_id:
+            payload["clientId"] = client_id
+        resp = self._post("Authentication/Login", payload)
         data = resp.json()
         if not data.get("IsSuccess"):
             raise RuntimeError(
                 f"Authentication failed: {data.get('ErrorMessage') or data.get('Reason') or 'unknown error'}"
             )
         self.token = data["Token"]
-        print(f"Authenticated successfully.")
+
+    def get_clients(self):
+        """Fetch the list of clients accessible to the authenticated user."""
+        resp = self._get("Client/GetClients")
+        data = resp.json()
+        if not data.get("IsSuccess"):
+            raise RuntimeError(
+                f"Failed to get clients: {data.get('ErrorMessage') or 'unknown error'}"
+            )
+        return data.get("Clients") or data.get("Data") or []
 
     def get_scans(self):
         """Fetch all scans. Handles pagination if present."""
@@ -167,6 +179,7 @@ def main():
     parser.add_argument("--url", required=True, help="AppSpider Enterprise base URL (e.g. https://appspider.example.com)")
     parser.add_argument("--username", required=True, help="Login username")
     parser.add_argument("--password", default=None, help="Login password (omit to be prompted securely)")
+    parser.add_argument("--client", default=None, help="Client name to scope the session to (required for multi-client instances)")
     parser.add_argument("--after", required=True, help="Download reports for scans completed after this date (YYYY-MM-DD)")
     parser.add_argument("--output", default="./reports", help="Output directory for downloaded reports (default: ./reports)")
     parser.add_argument("--no-verify-ssl", action="store_true", help="Disable SSL certificate verification")
@@ -193,9 +206,32 @@ def main():
     # Authenticate
     try:
         client.login(args.username, args.password)
+        print("Authenticated successfully.")
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+
+    # If a client name is specified, look up its ID and re-authenticate scoped to it
+    if args.client:
+        try:
+            clients = client.get_clients()
+            match = None
+            for c in clients:
+                name = c.get("Name") or c.get("ClientName") or ""
+                if name.lower() == args.client.lower():
+                    match = c
+                    break
+            if not match:
+                available = [c.get("Name") or c.get("ClientName") or "?" for c in clients]
+                print(f"Error: Client '{args.client}' not found. Available: {', '.join(available)}", file=sys.stderr)
+                sys.exit(1)
+            client_id = match.get("Id") or match.get("ClientId")
+            print(f"Switching to client '{args.client}' ({client_id})...")
+            client.login(args.username, args.password, client_id=client_id)
+            print("Re-authenticated with client scope.")
+        except RuntimeError as e:
+            print(f"Error resolving client: {e}", file=sys.stderr)
+            sys.exit(1)
 
     # Fetch scans
     print("Fetching scan list...")
