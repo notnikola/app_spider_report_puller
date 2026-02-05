@@ -41,7 +41,7 @@ class AppSpiderClient:
             headers["Authorization"] = f"Basic {self.token}"
         return headers
 
-    def _get(self, endpoint, params=None, stream=False):
+    def _get(self, endpoint, params=None, stream=False, timeout=120):
         url = f"{self.base_url}/{endpoint}"
         resp = self.session.get(
             url,
@@ -49,11 +49,12 @@ class AppSpiderClient:
             params=params,
             verify=self.verify_ssl,
             stream=stream,
+            timeout=timeout,
         )
         resp.raise_for_status()
         return resp
 
-    def _post(self, endpoint, json_data=None):
+    def _post(self, endpoint, json_data=None, timeout=60):
         url = f"{self.base_url}/{endpoint}"
         headers = {**self._auth_header(), "Content-Type": "application/json"}
         resp = self.session.post(
@@ -61,6 +62,7 @@ class AppSpiderClient:
             headers=headers,
             json=json_data,
             verify=self.verify_ssl,
+            timeout=timeout,
         )
         resp.raise_for_status()
         return resp
@@ -87,37 +89,24 @@ class AppSpiderClient:
             )
         return data.get("Clients") or data.get("Data") or []
 
-    def get_scans(self):
-        """Fetch all scans. Handles pagination if present."""
-        all_scans = []
-        page_index = 0
-        page_size = 100
+    def get_scans(self, verbose=False):
+        """Fetch all scans."""
+        if verbose:
+            print("  Requesting scans...", end=" ", flush=True)
 
-        while True:
-            resp = self._get("Scan/GetScans", params={
-                "pageSize": page_size,
-                "pageIndex": page_index,
-            })
-            data = resp.json()
+        resp = self._get("Scan/GetScans")
+        data = resp.json()
 
-            if not data.get("IsSuccess"):
-                raise RuntimeError(
-                    f"Failed to get scans: {data.get('ErrorMessage') or 'unknown error'}"
-                )
+        if not data.get("IsSuccess"):
+            raise RuntimeError(
+                f"Failed to get scans: {data.get('ErrorMessage') or 'unknown error'}"
+            )
 
-            scans = data.get("Scans") or data.get("Data") or []
-            if not scans:
-                break
+        scans = data.get("Scans") or data.get("Data") or []
+        if verbose:
+            print(f"got {len(scans)} scans")
 
-            all_scans.extend(scans)
-
-            # If we got fewer results than page size, we've reached the end
-            if len(scans) < page_size:
-                break
-
-            page_index += 1
-
-        return all_scans
+        return scans
 
     def has_report(self, scan_id):
         resp = self._get("Scan/HasReport", params={"scanId": scan_id})
@@ -183,6 +172,7 @@ def main():
     parser.add_argument("--after", required=True, help="Download reports for scans completed after this date (YYYY-MM-DD)")
     parser.add_argument("--output", default="./reports", help="Output directory for downloaded reports (default: ./reports)")
     parser.add_argument("--no-verify-ssl", action="store_true", help="Disable SSL certificate verification")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed progress")
 
     args = parser.parse_args()
 
@@ -236,7 +226,7 @@ def main():
     # Fetch scans
     print("Fetching scan list...")
     try:
-        scans = client.get_scans()
+        scans = client.get_scans(verbose=args.verbose)
     except Exception as e:
         print(f"Error fetching scans: {e}", file=sys.stderr)
         sys.exit(1)
