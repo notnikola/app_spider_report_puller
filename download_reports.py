@@ -108,12 +108,18 @@ class AppSpiderClient:
 
         if not data.get("IsSuccess"):
             raise RuntimeError(
-                f"Failed to get scan statuses: {data.get('ErrorMessage') or 'unknown error'}"
+                f"Failed to get scan statuses: {data.get('ErrorMessage') or 'unknown error'} | Raw: {data}"
             )
 
-        # Returns a dict mapping status ID to name
-        statuses = data.get("Statuses") or data.get("Data") or []
-        return {s.get("Id") or s.get("id"): s.get("Name") or s.get("name") for s in statuses}
+        # Try various possible response structures
+        statuses = data.get("Statuses") or data.get("Data") or data.get("Result") or []
+
+        # Handle if it's a dict directly (id -> name mapping)
+        if isinstance(statuses, dict):
+            return statuses
+
+        # Handle list of status objects
+        return {s.get("Id") or s.get("id") or s.get("Key"): s.get("Name") or s.get("name") or s.get("Value") for s in statuses}
 
     def has_report(self, scan_id):
         resp = self._get("Scan/HasReport", params={"scanId": scan_id})
@@ -179,6 +185,7 @@ def main():
     parser.add_argument("--after", required=True, help="Download reports for scans started after this date (YYYY-MM-DD)")
     parser.add_argument("--output", default="./reports", help="Output directory for downloaded reports (default: ./reports)")
     parser.add_argument("--no-verify-ssl", action="store_true", help="Disable SSL certificate verification")
+    parser.add_argument("--debug", action="store_true", help="Print debug info (sample scan data)")
 
     args = parser.parse_args()
 
@@ -254,6 +261,12 @@ def main():
         sys.exit(1)
 
     print(f"Found {len(scans)} total scans.")
+
+    if args.debug and scans:
+        import json
+        print("\n[DEBUG] Sample scan object:")
+        print(json.dumps(scans[0], indent=2, default=str))
+        print()
 
     # Filter for completed scans started after cutoff date
     matching = []
