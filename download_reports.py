@@ -89,43 +89,17 @@ class AppSpiderClient:
             )
         return data.get("Clients") or data.get("Data") or []
 
-    def get_scans(self, verbose=False):
-        """Fetch all scans. Handles pagination."""
-        all_scans = []
-        page = 1
-        page_size = 100
+    def get_scans(self):
+        """Fetch all scans."""
+        resp = self._get("Scan/GetScans")
+        data = resp.json()
 
-        while True:
-            if verbose:
-                print(f"  Requesting page {page}...", end=" ", flush=True)
+        if not data.get("IsSuccess"):
+            raise RuntimeError(
+                f"Failed to get scans: {data.get('ErrorMessage') or 'unknown error'}"
+            )
 
-            resp = self._get("Scan/GetScans", params={
-                "pageSize": page_size,
-                "page": page,
-            })
-            data = resp.json()
-
-            if not data.get("IsSuccess"):
-                raise RuntimeError(
-                    f"Failed to get scans: {data.get('ErrorMessage') or 'unknown error'}"
-                )
-
-            scans = data.get("Scans") or data.get("Data") or []
-            if verbose:
-                print(f"got {len(scans)} scans")
-
-            if not scans:
-                break
-
-            all_scans.extend(scans)
-
-            # If we got fewer results than page size, we've reached the end
-            if len(scans) < page_size:
-                break
-
-            page += 1
-
-        return all_scans
+        return data.get("Scans") or data.get("Data") or []
 
     def has_report(self, scan_id):
         resp = self._get("Scan/HasReport", params={"scanId": scan_id})
@@ -191,7 +165,6 @@ def main():
     parser.add_argument("--after", required=True, help="Download reports for scans started after this date (YYYY-MM-DD)")
     parser.add_argument("--output", default="./reports", help="Output directory for downloaded reports (default: ./reports)")
     parser.add_argument("--no-verify-ssl", action="store_true", help="Disable SSL certificate verification")
-    parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed progress")
 
     args = parser.parse_args()
 
@@ -245,7 +218,7 @@ def main():
     # Fetch scans
     print("Fetching scan list...")
     try:
-        scans = client.get_scans(verbose=args.verbose)
+        scans = client.get_scans()
     except Exception as e:
         print(f"Error fetching scans: {e}", file=sys.stderr)
         sys.exit(1)
