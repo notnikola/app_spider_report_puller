@@ -1,0 +1,272 @@
+#!/usr/bin/env python3
+"""
+Download completed scan reports from AppSpider Enterprise.
+
+Usage:
+    python download_reports.py \
+        --url https://appspider.example.com \
+        --username admin \
+        --password secret \
+        --after 2025-01-01 \
+        --output ./reports
+"""
+
+import argparse
+import os
+import re
+import sys
+from datetime import datetime, timezone
+
+import requests
+import urllib3
+
+
+BASE_PATH = "/AppSpiderEnterprise/rest/v1"
+
+
+class AppSpiderClient:
+    def __init__(self, base_url, verify_ssl=True):
+        self.base_url = base_url.rstrip("/") + BASE_PATH
+        self.verify_ssl = verify_ssl
+        self.token = None
+        self.session = requests.Session()
+
+        if not verify_ssl:
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    def _headers(self):
+        headers = {"Content-Type": "application/json"}
+        if self.token:
+            headers["Authorization"] = f"Basic {self.token}"
+        return headers
+
+    def _get(self, endpoint, params=None, stream=False):
+        url = f"{self.base_url}/{endpoint}"
+        resp = self.session.get(
+            url,
+            headers=self._headers(),
+            params=params,
+            verify=self.verify_ssl,
+            stream=stream,
+        )
+        resp.raise_for_status()
+        return resp
+
+    def _post(self, endpoint, json_data=None):
+        url = f"{self.base_url}/{endpoint}"
+        resp = self.session.post(
+            url,
+            headers=self._headers(),
+            json=json_data,
+            verify=self.verify_ssl,
+        )
+        resp.raise_for_status()
+        return resp
+
+    def login(self, username, password):
+        resp = self._post("Authentication/Login", {"name": username, "password": password})
+        data = resp.json()
+        if not data.get("IsSuccess"):
+            raise RuntimeError(
+                f"Authentication failed: {data.get('ErrorMessage') or data.get('Reason') or 'unknown error'}"
+            )
+        self.token = data["Token"]
+        print(f"Authenticated successfully.")
+
+    def get_scans(self):
+        """Fetch all scans. Handles pagination if present."""
+        all_scans = []
+        page_index = 0
+        page_size = 100
+
+        while True:
+            resp = self._get("Scan/GetScans", params={
+                "pageSize": page_size,
+                "pageIndex": page_index,
+            })
+            data = resp.json()
+
+            if not data.get("IsSuccess"):
+                raise RuntimeError(
+                    f"Failed to get scans: {data.get('ErrorMessage') or 'unknown error'}"
+                )
+
+            scans = data.get("Scans") or data.get("Data") or []
+            if not scans:
+                break
+
+            all_scans.extend(scans)
+
+            # If we got fewer results than page size, we've reached the end
+            if len(scans) < page_size:
+                break
+
+            page_index += 1
+
+        return all_scans
+
+    def has_report(self, scan_id):
+        resp = self._get("Scan/HasReport", params={"scanId": scan_id})
+        data = resp.json()
+        return data.get("Result", False)
+
+    def download_report_zip(self, scan_id):
+        """Download ReportAllFiles.zip for a scan. Returns bytes."""
+        resp = self._get("Report/GetReportZip", params={"scanId": scan_id}, stream=True)
+        content = resp.content
+        if not content or len(content) == 0:
+            raise RuntimeError(f"Empty report returned for scan {scan_id}")
+        return content
+
+
+def parse_date(date_str):
+    """Parse a date string from the API into a timezone-aware datetime.
+
+    Handles ISO 8601, .NET JSON dates like /Date(1234567890000)/, and plain dates.
+    """
+    if not date_str:
+        return None
+
+    # Handle .NET JSON date format: /Date(1234567890000)/
+    match = re.match(r"/Date\((\d+)([+-]\d{4})?\)/", date_str)
+    if match:
+        timestamp_ms = int(match.group(1))
+        return datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
+
+    # Try ISO 8601 formats
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(date_str, fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except ValueError:
+            continue
+
+    # Fallback: try fromisoformat (Python 3.7+)
+    try:
+        dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        return dt
+    except (ValueError, AttributeError):
+        pass
+
+    return None
+
+
+def sanitize_filename(name):
+    """Remove characters that are unsafe for filenames."""
+    return re.sub(r'[<>:"/\\|?*]', "_", name).strip()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Download completed AppSpider Enterprise scan reports."
+    )
+    parser.add_argument("--url", required=True, help="AppSpider Enterprise base URL (e.g. https://appspider.example.com)")
+    parser.add_argument("--username", required=True, help="Login username")
+    parser.add_argument("--password", required=True, help="Login password")
+    parser.add_argument("--after", required=True, help="Download reports for scans completed after this date (YYYY-MM-DD)")
+    parser.add_argument("--output", default="./reports", help="Output directory for downloaded reports (default: ./reports)")
+    parser.add_argument("--no-verify-ssl", action="store_true", help="Disable SSL certificate verification")
+
+    args = parser.parse_args()
+
+    # Parse cutoff date
+    try:
+        cutoff = datetime.strptime(args.after, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        print(f"Error: Invalid date format '{args.after}'. Use YYYY-MM-DD.", file=sys.stderr)
+        sys.exit(1)
+
+    # Create output directory
+    os.makedirs(args.output, exist_ok=True)
+
+    # Initialize client
+    client = AppSpiderClient(args.url, verify_ssl=not args.no_verify_ssl)
+
+    # Authenticate
+    try:
+        client.login(args.username, args.password)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Fetch scans
+    print("Fetching scan list...")
+    try:
+        scans = client.get_scans()
+    except Exception as e:
+        print(f"Error fetching scans: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Found {len(scans)} total scans.")
+
+    # Filter for completed scans after cutoff date
+    matching = []
+    for scan in scans:
+        status = scan.get("Status") or scan.get("ScanStatus") or ""
+        if status.lower() != "completed":
+            continue
+
+        # Try multiple possible date field names
+        completed_date_str = (
+            scan.get("CompletedTime")
+            or scan.get("CompletedDate")
+            or scan.get("EndTime")
+            or scan.get("FinishedTime")
+            or scan.get("ScanEndTime")
+        )
+        completed_date = parse_date(completed_date_str)
+
+        if completed_date and completed_date >= cutoff:
+            matching.append((scan, completed_date))
+
+    print(f"Found {len(matching)} completed scans after {args.after}.")
+
+    if not matching:
+        print("Nothing to download.")
+        return
+
+    # Download reports
+    downloaded = 0
+    skipped = 0
+
+    for scan, completed_date in matching:
+        scan_id = scan.get("Id") or scan.get("ScanId") or scan.get("id")
+        scan_name = scan.get("Name") or scan.get("ScanName") or scan.get("ConfigName") or str(scan_id)
+
+        label = f"{scan_name} ({scan_id})"
+        date_tag = completed_date.strftime("%Y%m%d")
+
+        # Check if report exists
+        try:
+            if not client.has_report(scan_id):
+                print(f"  SKIP {label} — no report available")
+                skipped += 1
+                continue
+        except Exception as e:
+            print(f"  SKIP {label} — error checking report: {e}")
+            skipped += 1
+            continue
+
+        # Download
+        safe_name = sanitize_filename(scan_name)
+        filename = f"{safe_name}_{date_tag}_{scan_id}.zip"
+        filepath = os.path.join(args.output, filename)
+
+        print(f"  Downloading {label}...")
+        try:
+            content = client.download_report_zip(scan_id)
+            with open(filepath, "wb") as f:
+                f.write(content)
+            print(f"    Saved: {filepath} ({len(content):,} bytes)")
+            downloaded += 1
+        except Exception as e:
+            print(f"    FAILED: {e}")
+            skipped += 1
+
+    print(f"\nDone. Downloaded: {downloaded}, Skipped: {skipped}")
+
+
+if __name__ == "__main__":
+    main()
