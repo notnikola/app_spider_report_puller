@@ -12,6 +12,7 @@ Usage:
 """
 
 import argparse
+import getpass
 import os
 import re
 import sys
@@ -34,8 +35,8 @@ class AppSpiderClient:
         if not verify_ssl:
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-    def _headers(self):
-        headers = {"Content-Type": "application/json"}
+    def _auth_header(self):
+        headers = {}
         if self.token:
             headers["Authorization"] = f"Basic {self.token}"
         return headers
@@ -44,7 +45,7 @@ class AppSpiderClient:
         url = f"{self.base_url}/{endpoint}"
         resp = self.session.get(
             url,
-            headers=self._headers(),
+            headers=self._auth_header(),
             params=params,
             verify=self.verify_ssl,
             stream=stream,
@@ -54,9 +55,10 @@ class AppSpiderClient:
 
     def _post(self, endpoint, json_data=None):
         url = f"{self.base_url}/{endpoint}"
+        headers = {**self._auth_header(), "Content-Type": "application/json"}
         resp = self.session.post(
             url,
-            headers=self._headers(),
+            headers=headers,
             json=json_data,
             verify=self.verify_ssl,
         )
@@ -164,12 +166,16 @@ def main():
     )
     parser.add_argument("--url", required=True, help="AppSpider Enterprise base URL (e.g. https://appspider.example.com)")
     parser.add_argument("--username", required=True, help="Login username")
-    parser.add_argument("--password", required=True, help="Login password")
+    parser.add_argument("--password", default=None, help="Login password (omit to be prompted securely)")
     parser.add_argument("--after", required=True, help="Download reports for scans completed after this date (YYYY-MM-DD)")
     parser.add_argument("--output", default="./reports", help="Output directory for downloaded reports (default: ./reports)")
     parser.add_argument("--no-verify-ssl", action="store_true", help="Disable SSL certificate verification")
 
     args = parser.parse_args()
+
+    # Prompt for password if not provided
+    if not args.password:
+        args.password = getpass.getpass(prompt="AppSpider password: ")
 
     # Parse cutoff date
     try:
