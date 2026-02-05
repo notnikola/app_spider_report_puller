@@ -102,24 +102,26 @@ class AppSpiderClient:
         return data.get("Scans") or data.get("Data") or []
 
     def get_scan_statuses(self):
-        """Fetch the scan status enum mapping (id -> name)."""
+        """Fetch the scan status enum mapping. Returns {name: id}."""
         resp = self._get("Scan/GetScanStatuses")
         data = resp.json()
+
+        # Response is directly {name: id} dict, no wrapper
+        # e.g. {'Completed': 32, 'Running': 82, ...}
+        if "Completed" in data:
+            return data
 
         if not data.get("IsSuccess"):
             raise RuntimeError(
                 f"Failed to get scan statuses: {data.get('ErrorMessage') or 'unknown error'} | Raw: {data}"
             )
 
-        # Try various possible response structures
-        statuses = data.get("Statuses") or data.get("Data") or data.get("Result") or []
-
-        # Handle if it's a dict directly (id -> name mapping)
+        # Fallback: try nested structures
+        statuses = data.get("Statuses") or data.get("Data") or data.get("Result") or {}
         if isinstance(statuses, dict):
             return statuses
 
-        # Handle list of status objects
-        return {s.get("Id") or s.get("id") or s.get("Key"): s.get("Name") or s.get("name") or s.get("Value") for s in statuses}
+        return {}
 
     def has_report(self, scan_id):
         resp = self._get("Scan/HasReport", params={"scanId": scan_id})
@@ -239,17 +241,14 @@ def main():
     # Fetch scan status mapping to find the "Completed" status ID
     try:
         status_map = client.get_scan_statuses()
-        completed_status_id = None
-        for status_id, status_name in status_map.items():
-            if status_name and status_name.lower() == "completed":
-                completed_status_id = status_id
-                break
+        # status_map is {name: id}, e.g. {'Completed': 32, 'Running': 82}
+        completed_status_id = status_map.get("Completed")
         if completed_status_id is None:
-            print(f"Warning: Could not find 'Completed' status in: {status_map}", file=sys.stderr)
-            print("Will attempt to match on status name instead.", file=sys.stderr)
+            print(f"Warning: Could not find 'Completed' status in: {list(status_map.keys())}", file=sys.stderr)
+        else:
+            print(f"Completed status ID: {completed_status_id}")
     except Exception as e:
         print(f"Warning: Could not fetch status mapping: {e}", file=sys.stderr)
-        status_map = {}
         completed_status_id = None
 
     # Fetch scans
