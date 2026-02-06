@@ -101,6 +101,19 @@ class AppSpiderClient:
 
         return data.get("Scans") or data.get("Data") or []
 
+    def get_configs(self):
+        """Fetch all scan configs. Returns {config_id: config_name}."""
+        resp = self._get("Config/GetConfigs")
+        data = resp.json()
+
+        if not data.get("IsSuccess"):
+            raise RuntimeError(
+                f"Failed to get configs: {data.get('ErrorMessage') or 'unknown error'}"
+            )
+
+        configs = data.get("Configs") or data.get("Data") or []
+        return {c.get("Id") or c.get("id"): c.get("Name") or c.get("name") for c in configs}
+
     def get_scan_statuses(self):
         """Fetch the scan status enum mapping. Returns {name: id}."""
         resp = self._get("Scan/GetScanStatuses")
@@ -238,6 +251,15 @@ def main():
             print(f"Error resolving client: {e}", file=sys.stderr)
             sys.exit(1)
 
+    # Fetch scan configs for name lookup
+    print("Fetching scan configs...")
+    try:
+        config_map = client.get_configs()
+        print(f"Found {len(config_map)} scan configs.")
+    except Exception as e:
+        print(f"Warning: Could not fetch configs: {e}", file=sys.stderr)
+        config_map = {}
+
     # Fetch scan status mapping to find the "Completed" status ID
     try:
         status_map = client.get_scan_statuses()
@@ -298,7 +320,9 @@ def main():
 
     for scan, start_time in matching:
         scan_id = scan.get("Id") or scan.get("ScanId") or scan.get("id")
-        scan_name = scan.get("Name") or scan.get("ScanName") or scan.get("ConfigName") or str(scan_id)
+        config_id = scan.get("ConfigId")
+        config_name = config_map.get(config_id) if config_id else None
+        scan_name = config_name or scan.get("Name") or scan.get("ScanName") or str(scan_id)
 
         label = f"{scan_name} ({scan_id})"
         date_tag = start_time.strftime("%Y%m%d")
